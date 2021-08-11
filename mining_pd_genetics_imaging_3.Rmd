@@ -1,12 +1,12 @@
 ---
-title: "Functional Interpretation"
+title: "Mining genetic, transcriptomic and imaging data in Parkinson’s disease - 3"
 author: "Manuel Tognon"
 date: "8/10/2021"
 output:
 html_document: default
 ---
 
-# Functional interpretation 
+# Functional interpretation
 
 Differential expression analysis on putamen and caudate dopamine uptake values.
 The below differential expression analysis test for genes showing a 
@@ -395,7 +395,7 @@ for (react in c("/resultsRNAseq/CD6_PPI_Reactome_Pathways.csv")){
 
 ```
 
-We found x pathways in common!
+We found 13 pathways in common!
 
 Therefore, we can conclude that SNP rs79761481 can potentially perturb these pathways and
 this pobservation has also been confirmed by transcriptomic data.
