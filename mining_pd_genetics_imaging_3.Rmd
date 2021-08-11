@@ -1,0 +1,403 @@
+---
+title: "Functional Interpretation"
+author: "Manuel Tognon"
+date: "8/10/2021"
+output:
+html_document: default
+---
+
+# Functional interpretation 
+
+Differential expression analysis on putamen and caudate dopamine uptake values.
+The below differential expression analysis test for genes showing a 
+differential expression by DaTscan putamen and caudate values, showed by the 
+individuals participating to PPMI baseline RNA-seq.
+After the differential expression analysis we'll be carried out an enrichment
+analysis to recover the  biological pathways potentially perturbed by 
+differentially expressed genes.
+
+R packages required:
+
+   - DESeq2
+   - ggplot2
+   - limma
+   - fgsea
+   - org.Hs.eg.db
+   - ReactomePA
+   - data.table
+   - RNOmni
+
+
+```{r}
+
+if(!require("BiocManager", character.only = TRUE))
+{
+  install.packages("BiocManager")
+  if(!require("BiocManager", character.only = TRUE))
+  {
+    stop("BiocManager package not found")
+  }
+}
+
+if(!require("DESeq2", character.only = TRUE))
+{
+  BiocManager::install("DESeq2")
+  if(!require("DESeq2", character.only = TRUE))
+  {
+    stop("DESeq2 package not found")
+  }
+}
+
+if(!require("ggplot2", character.only = TRUE))
+{
+  install.packages("ggplot2")
+  if(!require("ggplot2", character.only = TRUE))
+  {
+    stop("ggplot2 package not found")
+  }
+}
+
+if(!require("limma", character.only = TRUE))
+{
+  BiocManager::install("limma")
+  if(!require("limma", character.only = TRUE))
+  {
+    stop("limma package not found")
+  }
+}
+
+if(!require("fgsea", character.only = TRUE))
+{
+  BiocManager::install("fgsea")
+  if(!require("fgsea", character.only = TRUE))
+  {
+    stop("fgsea package not found")
+  }
+}
+
+if(!require("org.Hs.eg.db", character.only = TRUE))
+{
+  BiocManager::install("org.Hs.eg.db")
+  if(!require("org.Hs.eg.db", character.only = TRUE))
+  {
+    stop("org.Hs.eg.db")
+  }
+}
+
+if(!require("ReactomePA", character.only = TRUE))
+{
+  BiocManager::install("ReactomePA")
+  if(!require("ReactomePA", character.only = TRUE))
+  {
+    stop("ReactomePA package not found")
+  }
+}
+
+if(!require("data.table", character.only = TRUE))
+{
+  install.packages("data.table")
+  if(!require("data.table", character.only = TRUE))
+  {
+    stop("data.table package not found")
+  }
+}
+
+if(!require("RNOmni", character.only = TRUE))
+{
+  install.packages("RNOmni")
+  if(!require("RNOmni", character.only = TRUE))
+  {
+    stop("RNOmni package not found")
+  }
+}
+
+if(!require("STRINGdb", character.only = TRUE))
+{
+  install.packages("STRINGdb")
+  if(!require("STRINGdb", character.only = TRUE))
+  {
+    stop("STRINGdb package not found")
+  }
+}
+
+```
+
+
+Import the libraries previously installed.
+
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(limma)
+library(fgsea)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(data.table)
+library(RNOmni)
+library(STRINGdb)
+library(httr)
+```
+
+
+
+Let's begin by importing data RNA-seq counts and phenotype data!
+
+```{r}
+
+counts <- read.table("data/transcriptomic/PPMI-RNA-seq_baseline_rawCounts.txt")
+metadata <- read.csv("data/pheno/PPMI-baseline_pheno.csv")
+```
+
+
+Samples are identified by complex names, let's recover their PATNO...
+
+```{r}
+getid <- function(s){
+  patno <- unlist(strsplit(s, ".", fixed = T))[4]
+  return(patno)
+}
+samples.ids <- colnames(counts)
+samples.ids.new <- sapply(samples.ids, getid)
+names(samples.ids.new) <- NULL  # remove old names
+colnames(counts) <- samples.ids.new
+head(counts)
+```
+```{r}
+# sort the samples in metadata 
+rownames(metadata) <- metadata$PATNO
+metadata <- metadata[colnames(counts),]
+head(metadata)
+```
+
+Before proceeding with DE analysis, let's cast our covariates to factors:
+
+```{r}
+metadata$gen <- as.factor(metadata$gen)
+metadata$age_cat <- as.factor(metadata$age_cat)
+metadata$educ <- as.factor(metadata$educ)
+```
+
+
+Then, we categorize in two groups normalized Putamen Left values.
+
+```{r}
+metadata$PUTAMEN_L.cat <- cut(
+  metadata$PUTAMEN_L_norm, 
+  breaks = c(quantile(metadata$PUTAMEN_L_norm, probs = seq(0, 1, by = 1/2))),
+  labels = c(1,2)
+)
+metadata$PUTAMEN_L.cat[34] <- 1  # fix quantile() bug
+
+```
+
+
+Now we are ready to create the statistical model and the DESeq object for DE analysis!
+
+```{r}
+dds <- DESeqDataSetFromMatrix(
+  countData = counts, colData = metadata, 
+  design = ~ PUTAMEN_L.cat + gen + age_cat + ENROLL_CAT + educ
+)
+```
+
+
+Low quality genes are filtered out keeping only those expressed in at least one sample for each group.
+
+```{r}
+summary(metadata$PUTAMEN_L.cat)  # 130  130
+keep <- apply(counts(dds), 1, function(x){sum(x != 0) > 130})
+dds <- dds[keep,]
+```
+
+First, we now check for potential batch effects or outliers in our data
+
+```{r}
+# count normalization 
+vsd <- vst(dds, blind = F)
+
+# plot PCA coloring samples by gender group
+p <- plotPCA(vsd, intgroup = "gen", returnData=F)
+p + geom_label(aes(label = colnames(dds))) + 
+  ggtitle("Gender")  #  batch effect by gender
+```
+
+There is a serious batch effect caused by samples geneder...
+We should remove it before proceeding, since it could seriously bias our results!
+
+````{r}
+# correct counts to remove batch effect
+assay(vsd) <- limma::removeBatchEffect(assay(vsd), vsd$gen)
+p <- plotPCA(vsd, intgroup = "gen", returnData=F)
+p + geom_label(aes(label = colnames(dds))) + 
+  ggtitle("Gender")  # batch effect removed
+```
+
+
+Once the batch effect has been removes, we can perform differential expression analysis
+
+```{r}
+dds <- DESeq(dds)
+```
+
+To visualize the results we can use the results() function of the "DESeq2" package specifying the appropriate contrast.
+Then, we remove non significant genes (adjusted p-value < 0.1) and we order them by LogFC for a better visualization.
+
+```{r}
+results.putamen.l <- results(dds, contrast = c("PUTAMEN_L.cat", "1", "2"))
+results.putamen.l <- results.putamen.l[!is.na(results.putamen.l$padj),]
+results.putamen.l <- results.putamen.l[results.putamen.l$padj < .1,]
+dim(results.putamen.l)
+results.putamen.l <- results.putamen.l[order(results.putamen.l$log2FoldChange, decreasing = T),]
+
+head(results.putamen.l)
+```
+
+
+Once that the DE genes were retrieved, we are ready to perform Enrichment analysis using the "fgsea" package.
+As first step we map Ensembl IDs of genes to the EntrezID as required by "fgsea".
+
+```{r}
+# remove the ID versions from the genes' names
+ensembl.ids <- rownames(results.putamen.l)
+ensembl.ids <- sapply(
+  rownames(results.putamen.l),
+  function(x){
+    unlist(strsplit(x, fixed = T, split = "."))[1]
+  }
+)
+names(ensembl.ids) <- NULL  # remove old names 
+
+# mapping 
+entrez.ids <- select(
+  org.Hs.eg.db, 
+  keys = ensembl.ids, 
+  columns = "ENTREZID",
+  keytype = "ENSEMBL"
+)
+entrez.ids <- entrez.ids[!duplicated(entrez.ids$ENSEMBL),]  # remove duplicates
+entrez.ids <- entrez.ids[!is.na(entrez.ids$ENTREZID),]  # remove NAs
+results.putamen.l <- results.putamen.l[entrez.ids$ENSEMBL,]  # remove unmapped genes
+
+# change the names of the genes
+rownames(results.putamen.l) <- entrez.ids$ENTREZID
+head(results.putamen.l)
+```
+
+
+Now, we can perform Enrichment analysis.
+First, we order genes by LogFC. 
+Then, we retrieve the Reactome gene sets using the ```reactomePathways()``` function and then we run ```fgsea()```.
+At the end we filter out non significant pathways (adjusted p-value < 0.1)
+
+```{r}
+# construct a vector containing the LogFC of each gene
+lfc <- results.putamen.l$log2FoldChange
+names(lfc) <- rownames(results.putamen.l)
+
+# recover pathways 
+pathways <- reactomePathways(names(lfc))
+enr.fgsea.reactome <- fgsea(
+  pathways, 
+  lfc,
+  nPermSimple = 1000000,
+  eps = 0,
+  minSize = 5
+)
+
+# subset to signifcant pathways (q-value < 0.1)
+enr.fgsea.reactome <- enr.fgsea.reactome[enr.fgsea.reactome$padj < .1,]
+head(as.data.frame(enr.fgsea.reactome))
+```
+
+To export the pathways retrieved we can use the fwrite() function of the package "data.table"
+
+```{r, eval=FALSE}
+# store results
+fwrite(
+  as.data.frame(enr.fgsea.reactome),
+  "../resultsRNAseq/Fgsea_PutamenL_Reactome.csv",
+  sep = "\t",
+  sep2 = c("", " ", "")
+)
+```
+
+We can use the same code for all the features we considered in our study.
+Therefore, we will get a CSV file with potentially perturbed pathways for each neuroimaging feature we 
+considered.
+
+And now?
+
+Let's combine the results obtained from GWAS, DE and Enrichment analyses! 
+
+In our example we will focus on 11:60750247 SNP (found during Individual View with DaTscan).
+
+First, we search of the SNP is mapped within or close to any gene. To do this let's use 
+UCSC genome browser (https://genome.ucsc.edu/).
+
+Our SNP (rs79761481 with RsID) maps within CD6 gene! That is a good starting point. 
+We now explore if there are any gene interacting with CD6.
+Let's recover CD6 PPI!
+
+To do this we will use STRINGdb R package:
+```{r}
+string_db <- STRINGdb$new( 
+  version = "11", species = 9606
+)
+protein <-  string_db$mp("CD6")
+neig <- string_db$get_neighbors(protein)
+string_db$plot_network(neig)
+```
+
+As we can see CD6 gene has many direct and indirect interactors. Let's the retrieve 
+their names:
+
+```{r}
+neig.genes <- sapply(
+  neig, 
+  function(x){
+    base <- "https://string-db.org/api/tsv/get_string_ids?"
+    id <- paste0("identifiers=", x, "%0dcdk2&")
+    species <-  "species=9606"
+    url <- paste0(base,id,species)
+    res <- GET(url)
+    con <- rawToChar(res$content)
+    df  <- read.table(text = con, sep = "\t", header = TRUE)
+    return(df$preferredName[1])
+  }
+)
+names(neig.genes) <- NULL
+neig.genes
+```
+
+Now that we have CD6 interactors names, we can search the pathways in which they participate.
+Let's go to Reactiome database (https://reactome.org/).
+
+Once we downloaded the list of CD6 interactors pathways, we can intersect the recovered pathways
+with those found during our enrichment analyses.
+
+```{r}
+files = list.files(path="../tutorialICHI/resultsRNAseq/DATSCAN", pattern="*.csv", full.names = T)
+files = c(files, list.files(path="../tutorialICHI/resultsRNAseq/MRI", pattern="*.csv", full.names = T) )
+
+for (react in c("/resultsRNAseq/CD6_PPI_Reactome_Pathways.csv")){
+  cat("******* PPI of: ", strsplit(react,"_")[[1]][1]," *******")
+  reactome = read.csv(paste(getwd(),react, sep = ""), header=T, sep=",")
+  reactome = reactome[reactome$Entities.FDR<0.1,]
+  if(nrow(reactome)==0){break}
+  for (i in files){
+   pheno = strsplit(i,"_")[[1]][2]
+   cat("\nPheno: ", pheno, "\n")
+   df = read.csv(i,sep="\t")[,c(1,8)]
+   print((intersect(reactome$Pathway.name,df$pathway)))
+   cat("\n\n")
+ }
+}
+
+```
+
+We found x pathways in common!
+
+Therefore, we can conclude that SNP rs79761481 can potentially perturb these pathways and
+this pobservation has also been confirmed by transcriptomic data.
+
+Moreover, the found pathways have been linked to PD in literature (Kannarkat GT *et al.*, Journal of Parkinson's disease 2013; Xie L *et al.*, Journal of neuroinflammation 2010; Hu Y *et al.*, Frontiers in neurology 2020).
